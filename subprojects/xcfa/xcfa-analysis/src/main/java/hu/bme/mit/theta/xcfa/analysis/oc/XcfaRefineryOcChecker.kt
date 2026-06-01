@@ -52,14 +52,13 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
     // do not add po and ws relation constraints here!
 
     val helperScripts = mutableSetOf<String>()
-    val (eventsCode, rfPredicatesCode) = generateEvents(eg)
 
     baseRefineryCode = buildString {
       append(generateMetamodel())
-      append(eventsCode)
+      append(generateEvents(eg))
       append(generateRelations(eg))
-      append(rfPredicatesCode)
-      append(generateErrors(eg)) // A hibáknak is lehetnek helperei
+      append(generateErrors(eg))
+      append(generateBranchingConditions(eg))
 
       if (helperScripts.isNotEmpty()) {
         append("\n% --- Helper Functions ---\n")
@@ -74,7 +73,8 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
 
   private fun generateMetamodel(): String {
     return """
-            class Event {
+            import builtin::strategy.
+            abstract class Event {
                 int value
             }
             
@@ -84,8 +84,9 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
             class Write extends Event.
 
             !exists(Read::new).
-            !exists(Read::new).
+            !exists(Write::new).
             
+            @decide(false)
             pred hb(Event a, Event b).
             
             pred po(Event a, Event b).
@@ -99,12 +100,24 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
 
             propagation rule rfIsHb(Write w, Read r) <->
                 rf(w, r) ==> hb(w, r).
+            propagation rule notHbIsNotRf(Write w, Read r) <->
+                !hb(w, r) ==> !rf(w, r).
                 
             propagation rule poIsHb(Event a, Event b) <->
                 po(a, b) ==> hb(a, b).
+            propagation rule notHbIsNotPo(Event a, Event b) <->
+                !hb(a, b) ==> !po(a, b).
                 
             propagation rule wsIsHb(Write w1, Write w2) <->
                 ws(w1, w2) ==> hb(w1, w2).
+            propagation rule notHbIsNotWs(Write w1, Write w2) <->
+                !hb(w1, w2) ==> !ws(w1, w2).
+                
+            propagation rule hbAntySymmetric(Event a, Event b) <->
+                hb(a, b) ==> !hb(b, a).
+
+            propagation rule hbNotReflexive(Event e) <->
+                true ==> !hb(e, e).
 
             propagation rule hbTransitive(Event a, Event c) <->
                 hb(a, b), hb(b, c) ==> hb(a, c).
@@ -126,16 +139,28 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
             error pred rfViolation(Write w, Read r) <->
                 (rf(w, r)), 
                 rfDisabledOrNotEqual(w, r).
+            propagation rule rfViolationPropagation(Write w, Read r) <->
+                rf(w, r), guard(w), guard(r) ==> assert value(w) == value(r).
 
             error pred readFromSeveralWriters(Read r, Write w1, Write w2) <->
                 rf(w1, r), rf(w2, r), w1 != w2.
                 
+            propagation rule readFromSeveralWritesProp1(Read r, Write w1, Write w2) <->
+                rf(w1, r), rf(w2, r) ==> equals(w1, w2).
+            propagation rule readFromSeveralWritesProp2(Read r, Write w2) <->
+                rf(w1, r), w1 != w2 ==> !rf(w2, r).
+
+            propagation rule noRfForDisabledRead(Write w, Read r) <->
+                !guard(r) ==> !rf(w, r).
+                
+            error pred rfSome(Read r) <->
+                guard(r), !rf(_, r).
+                
         """.trimIndent()
   }
 
-  private fun generateEvents(eg: XcfaToEventGraph.EventGraph): Pair<String, String> {
+  private fun generateEvents(eg: XcfaToEventGraph.EventGraph): String {
     val sb = StringBuilder("\n% Events\n")
-    val rfPredicatesSb = StringBuilder("\n% Possible Read-From Predicates\n")
     eg.events.values.flatMap { it.values }.flatten().forEach { event ->
       val helperScripts = mutableSetOf<String>()
       val valueExpr = event.assignment
@@ -179,45 +204,32 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
 
       val guardString = event.guard.joinToString(" && ") { it.toRefineryExpr(eg.events, helperScripts, event.refineryId) }
 
-      val type = if (event.type == EventType.READ) "true" else "false"
-
       if (event.type == EventType.READ) sb.appendLine("Read(${event.refineryId}).") else sb.appendLine("Write(${event.refineryId}).")
 
       sb.appendLine("atom ${event.refineryId}.")
-      //sb.appendLine("value(${event.refineryId}): $valueExprToString.")
 
       if (event.guard.isEmpty()) {
         sb.appendLine("guard(${event.refineryId}).")
       }
       else {
-        sb.appendLine("error pred guard${event.refineryId}() <->\n" +
+        sb.appendLine("error pred guardError${event.refineryId}() <->\n" +
                       "\t!(guard(${event.refineryId})) , ($guardString);\n" +
                       "\t(guard(${event.refineryId})) , !($guardString).")
+        sb.appendLine("propagation rule guard${event.refineryId}_True() <->\n" +
+                      "\t(guard(${event.refineryId}))\n" +
+                      "==>\n" +
+                      "\tassert ($guardString).")
+        sb.appendLine("propagation rule guard${event.refineryId}_False() <->\n" +
+                      "\t!(guard(${event.refineryId}))\n" +
+                      "==>\n" +
+                      "\tassert !($guardString).")
       }
     }
 
-    eg.rfs.forEach { (v, list) ->
-      list
-        .groupBy { it.to }
-        .forEach { (event, rfs) ->
-          rfs.forEach { rf ->
-            // TODO rf-val
-          }
-
-          rfPredicatesSb.appendLine("error pred rfSome${event.refineryId}() <->")
-          val possibleRfs = rfs.joinToString(" , ") { rel ->
-            "!rf(${rel.from.refineryId}, ${rel.to.refineryId})"
-          }
-          if (possibleRfs == "") {
-            rfPredicatesSb.appendLine("\tguard(${event.refineryId}).")
-          } else {
-            rfPredicatesSb.appendLine("\tguard(${event.refineryId}) , $possibleRfs.")
-          }
-        }
-    }
-
-    return Pair(sb.toString(), rfPredicatesSb.toString())
+    return sb.toString()
   }
+
+  //branchingConditions
 
   private fun generateRelations(eg: XcfaToEventGraph.EventGraph): String {
     val sb = StringBuilder("\n% Relations\n")
@@ -258,6 +270,23 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
 
     sb.appendLine("error pred violationNotFound() <-> !errorReached().")
 
+    return sb.toString()
+  }
+
+  private fun generateBranchingConditions(eg: XcfaToEventGraph.EventGraph): String {
+    if (eg.branchingConditions.isEmpty()) return ""
+    val sb = StringBuilder("\n% Branching conditions\n")
+
+    eg.branchingConditions.forEachIndexed { index, bc ->
+      val bcId = "bc${index}"
+      val helperScripts = mutableSetOf<String>()
+      val guardExpr = bc.toRefineryExpr(eg.events, helperScripts, currentEventId = bcId)
+      sb.appendLine("error pred ${bcId}_Err() <-> !($guardExpr).")
+      sb.appendLine("propagation rule ${bcId}_PR() <->\n" +
+                    "\ttrue\n" +
+                    "==>\n" +
+                    "\tassert $guardExpr.")
+    }
     return sb.toString()
   }
 
