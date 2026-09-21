@@ -55,10 +55,10 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
 
     baseRefineryCode = buildString {
       append(generateMetamodel())
-      append(generateEvents(eg))
+      append(generateEvents(eg, helperScripts))
       append(generateRelations(eg))
-      append(generateErrors(eg))
-      append(generateBranchingConditions(eg))
+      append(generateErrors(eg, helperScripts))
+      append(generateBranchingConditions(eg, helperScripts))
 
       if (helperScripts.isNotEmpty()) {
         append("\n% --- Helper Functions ---\n")
@@ -145,7 +145,7 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
             error pred readFromSeveralWriters(Read r, Write w1, Write w2) <->
                 rf(w1, r), rf(w2, r), w1 != w2.
                 
-            propagation rule readFromSeveralWritesProp1(Read r, Write w1, Write w2) <->
+            propagation rule readFromSeveralWritesProp1(Write w1, Write w2) <->
                 rf(w1, r), rf(w2, r) ==> equals(w1, w2).
             propagation rule readFromSeveralWritesProp2(Read r, Write w2) <->
                 rf(w1, r), w1 != w2 ==> !rf(w2, r).
@@ -159,10 +159,10 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
         """.trimIndent()
   }
 
-  private fun generateEvents(eg: XcfaToEventGraph.EventGraph): String {
+  private fun generateEvents(eg: XcfaToEventGraph.EventGraph, helperScripts: MutableSet<String>): String {
     val sb = StringBuilder("\n% Events\n")
     eg.events.values.flatMap { it.values }.flatten().forEach { event ->
-      val helperScripts = mutableSetOf<String>()
+      //val helperScripts = mutableSetOf<String>()
       val valueExpr = event.assignment
 
       when(valueExpr) {
@@ -184,9 +184,6 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
               "\ttrue\n" +
               "==>\n" +
               "\tassert ${valueExpr.toRefineryExpr(eg.events, helperScripts, event.refineryId)}.")
-            helperScripts.forEach {
-              sb.appendLine(it)
-            }
           }
         }
         is TrueExpr -> {}
@@ -196,9 +193,7 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
             "\ttrue\n" +
             "==>\n" +
             "\tassert ${valueExpr.toRefineryExpr(eg.events, helperScripts, event.refineryId)}.")
-          helperScripts.forEach {
-            sb.appendLine(it)
-          }
+
         }
       }
 
@@ -229,8 +224,6 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
     return sb.toString()
   }
 
-  //branchingConditions
-
   private fun generateRelations(eg: XcfaToEventGraph.EventGraph): String {
     val sb = StringBuilder("\n% Relations\n")
 
@@ -247,13 +240,15 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
     eg.wss.forEach { (varDecl, relations) ->
       relations.forEach { rel ->
         sb.append("?ws(${rel.from.refineryId}, ${rel.to.refineryId}).\n")
+        sb.append("error pred ${rel.from.refineryId}_${rel.to.refineryId}_no_ws() <->\n" +
+                  "\tguard(${rel.from.refineryId}), guard(${rel.to.refineryId}), !ws(${rel.from.refineryId}, ${rel.to.refineryId}), !ws(${rel.to.refineryId}, ${rel.from.refineryId}).\n")
       }
     }
 
     return sb.toString()
   }
 
-  private fun generateErrors(eg: XcfaToEventGraph.EventGraph): String {
+  private fun generateErrors(eg: XcfaToEventGraph.EventGraph, helperScripts: MutableSet<String>): String {
     if (eg.violations.isEmpty()) return ""
 
     val sb = StringBuilder("\n% Reach errors\n")
@@ -262,7 +257,7 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
     eg.violations.forEachIndexed { index, violation ->
       val errorId = "err${index}_pid${violation.pid}"
       errorNames.add(errorId)
-      val helperScripts = mutableSetOf<String>()
+      //val helperScripts = mutableSetOf<String>()
       val guardExpr = violation.guard.toRefineryExpr(eg.events, helperScripts, currentEventId = errorId)
       sb.appendLine("pred $errorId() <-> $guardExpr.")
     }
@@ -273,13 +268,13 @@ internal class XcfaRefineryOcChecker : XcfaOcChecker {
     return sb.toString()
   }
 
-  private fun generateBranchingConditions(eg: XcfaToEventGraph.EventGraph): String {
+  private fun generateBranchingConditions(eg: XcfaToEventGraph.EventGraph, helperScripts: MutableSet<String>): String {
     if (eg.branchingConditions.isEmpty()) return ""
     val sb = StringBuilder("\n% Branching conditions\n")
 
     eg.branchingConditions.forEachIndexed { index, bc ->
       val bcId = "bc${index}"
-      val helperScripts = mutableSetOf<String>()
+      //val helperScripts = mutableSetOf<String>()
       val guardExpr = bc.toRefineryExpr(eg.events, helperScripts, currentEventId = bcId)
       sb.appendLine("error pred ${bcId}_Err() <-> !($guardExpr).")
       sb.appendLine("propagation rule ${bcId}_PR() <->\n" +
